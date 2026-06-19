@@ -56,6 +56,7 @@ def get_account_credentials(region: str) -> str:
     elif r in {"BR", "US", "SAC", "NA"}:
         return "uid=4044223479&password=EB067625F1E2CB705C7561747A46D502480DC5D41497F4C90F3FDBC73B8082ED"
     else:
+        # এখানে accounts.txt থেকে নেওয়া ফ্রেশ সচল গেস্ট অ্যাকাউন্টটি দেওয়া হয়েছে
         return "uid=3994059093&password=2150B9374CD59EB7C073F00529CF19730FADA395CDEBBEFCB815163752F8E6AD"
 
 # === Token Generation ===
@@ -82,10 +83,18 @@ async def create_jwt(region: str):
     async with httpx.AsyncClient() as client:
         resp = await client.post(url, data=payload, headers=headers)
         msg = json.loads(json_format.MessageToJson(decode_protobuf(resp.content, FreeFire_pb2.LoginRes)))
+        
+        token = msg.get('token')
+        server_url = msg.get('serverUrl')
+        
+        # কোনো কারণে টোকেন বা ইউআরএল না পাওয়া গেলে এক্সেপশন থ্রো করবে (ক্যাশ করবে না)
+        if not token or not server_url:
+            raise ValueError(f"MajorLogin failed for region {region}. Account might be banned or rate-limited. Response: {msg}")
+            
         cached_tokens[region] = {
-            'token': f"Bearer {msg.get('token','0')}",
+            'token': f"Bearer {token}",
             'region': msg.get('lockRegion','0'),
-            'server_url': msg.get('serverUrl','0'),
+            'server_url': server_url,
             'expires_at': time.time() + 25200
         }
 
@@ -111,7 +120,7 @@ async def GetAccountInformation(uid, unk, region, endpoint):
     data_enc = aes_cbc_encrypt(MAIN_KEY, MAIN_IV, payload)
     token, lock, server = await get_token_info(region)
     
-    # প্রোটোকল মিসিং চেক করা হচ্ছে
+    # ইউআরএল-এ প্রোটোকল মিসিং থাকলে যুক্ত করে দেবে
     if not server.startswith("http://") and not server.startswith("https://"):
         server = "http://" + server
         
