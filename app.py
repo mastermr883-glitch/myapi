@@ -56,7 +56,8 @@ def get_account_credentials(region: str) -> str:
     elif r in {"BR", "US", "SAC", "NA"}:
         return "uid=4044223479&password=EB067625F1E2CB705C7561747A46D502480DC5D41497F4C90F3FDBC73B8082ED"
     else:
-        return "uid=4660781076&password=jshsjs_T7BNL_BY_SPIDEERIO_GAMING_2R92G"
+        # এখানে accounts.txt থেকে নেওয়া ফ্রেশ সচল গেস্ট অ্যাকাউন্টটি দেওয়া হয়েছে
+        return "uid=3994059093&password=2150B9374CD59EB7C073F00529CF19730FADA395CDEBBEFCB815163752F8E6AD"
 
 # === Token Generation ===
 
