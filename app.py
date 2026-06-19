@@ -2,6 +2,7 @@ import asyncio
 import time
 import httpx
 import json
+import os
 from collections import defaultdict
 from functools import wraps
 from flask import Flask, request, jsonify
@@ -20,7 +21,7 @@ MAIN_KEY = base64.b64decode('WWcmdGMlREV1aDYlWmNeOA==')
 MAIN_IV = base64.b64decode('Nm95WkRyMjJFM3ljaGpNJQ==')
 RELEASEVERSION = "OB53" # গেম আপডেটের সাথে এটি পরিবর্তন করতে হবে (যেমন: OB54)
 USERAGENT = "Dalvik/2.1.0 (Linux; U; Android 13; CPH2095 Build/RKQ1.211119.001)"
-SUPPORTED_REGIONS = ["IND", "BR", "US", "SAC", "NA", "SG", "RU", "ID", "TW", "VN", "TH", "ME", "PK", "CIS", "BD", "EUROPE"]
+SUPPORTED_REGIONS = {"IND", "BR", "US", "SAC", "NA", "SG", "RU", "ID", "TW", "VN", "TH", "ME", "PK", "CIS", "BD", "EUROPE"}
 
 # === Flask App Setup ===
 
@@ -29,6 +30,9 @@ CORS(app)
 cache = TTLCache(maxsize=100, ttl=300)
 cached_tokens = defaultdict(dict)
 uid_region_cache = {}
+
+# বিশ্বব্যাপী সচল গেস্ট অ্যাকাউন্টের ইনডেক্স ট্র্যাক করার জন্য ভ্যারিয়েবল
+working_account_index = 0
 
 # === Helper Functions ===
 
@@ -49,15 +53,17 @@ async def json_to_proto(json_data: str, proto_message: Message) -> bytes:
     json_format.ParseDict(json.loads(json_data), proto_message)
     return proto_message.SerializeToString()
 
-def get_account_credentials(region: str) -> str:
-    r = region.upper()
-    if r == "IND":
-        return "uid=4421504713&password=JOBAYAR_CODX-64IGDYZCD"
-    elif r in {"BR", "US", "SAC", "NA"}:
-        return "uid=4044223479&password=EB067625F1E2CB705C7561747A46D502480DC5D41497F4C90F3FDBC73B8082ED"
-    else:
-        # এখানে accounts.txt থেকে নেওয়া ফ্রেশ সচল গেস্ট অ্যাকাউন্টটি দেওয়া হয়েছে
-        return "uid=3994059093&password=2150B9374CD59EB7C073F00529CF19730FADA395CDEBBEFCB815163752F8E6AD"
+# accounts.txt থেকে অ্যাকাউন্টগুলোর তালিকা লোড করার ফাংশন
+def load_accounts():
+    accounts = []
+    path = os.path.join(os.path.dirname(__file__), 'accounts.txt')
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    accounts.append((parts[0], parts[1]))
+    return accounts
 
 # === Token Generation ===
 
@@ -65,46 +71,67 @@ async def get_access_token(account: str):
     url = "https://ffmconnect.live.gop.garenanow.com/oauth/guest/token/grant"
     payload = account + "&response_type=token&client_type=2&client_secret=2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3&client_id=100067"
     headers = {'User-Agent': USERAGENT, 'Connection': "Keep-Alive", 'Accept-Encoding': "gzip", 'Content-Type': "application/x-www-form-urlencoded"}
-    # verify=False যুক্ত করে এসএসএল এরর এড়ানো হয়েছে
     async with httpx.AsyncClient(verify=False) as client:
         resp = await client.post(url, data=payload, headers=headers)
         data = resp.json()
         return data.get("access_token", "0"), data.get("open_id", "0")
 
 async def create_jwt(region: str):
-    account = get_account_credentials(region)
-    token_val, open_id = await get_access_token(account)
-    body = json.dumps({"open_id": open_id, "open_id_type": "4", "login_token": token_val, "orign_platform_type": "4"})
-    proto_bytes = await json_to_proto(body, FreeFire_pb2.LoginReq())
-    payload = aes_cbc_encrypt(MAIN_KEY, MAIN_IV, proto_bytes)
-    url = "https://loginbp.ggblueshark.com/MajorLogin"
-    headers = {'User-Agent': USERAGENT, 'Connection': "Keep-Alive", 'Accept-Encoding': "gzip",
-               'Content-Type': "application/octet-stream", 'Expect': "100-continue", 'X-Unity-Version': "2018.4.11f1",
-               'X-GA': "v1 1", 'ReleaseVersion': RELEASEVERSION}
-    # verify=False যুক্ত করে এসএসএল এরর এড়ানো হয়েছে
-    async with httpx.AsyncClient(verify=False) as client:
-        resp = await client.post(url, data=payload, headers=headers)
-        msg = json.loads(json_format.MessageToJson(decode_protobuf(resp.content, FreeFire_pb2.LoginRes)))
+    global working_account_index
+    accounts = load_accounts()
+    
+    # ব্যাকআপ হিসেবে যদি ফাইল না পাওয়া যায়
+    if not accounts:
+        accounts = [("3994059093", "2150B9374CD59EB7C073F00529CF19730FADA395CDEBBEFCB815163752F8E6AD")]
+
+    start_idx = working_account_index
+    
+    # সচল এবং আনব্যানড গেস্ট অ্যাকাউন্ট খুঁজে পাওয়ার জন্য লুপ
+    for i in range(len(accounts)):
+        idx = (start_idx + i) % len(accounts)
+        uid, password = accounts[idx]
+        account_str = f"uid={uid}&password={password}"
         
-        token = msg.get('token')
-        server_url = msg.get('serverUrl')
-        
-        if not token or not server_url:
-            raise ValueError(f"MajorLogin failed for region {region}. Response: {msg}")
+        try:
+            token_val, open_id = await get_access_token(account_str)
+            body = json.dumps({"open_id": open_id, "open_id_type": "4", "login_token": token_val, "orign_platform_type": "4"})
+            proto_bytes = await json_to_proto(body, FreeFire_pb2.LoginReq())
+            payload = aes_cbc_encrypt(MAIN_KEY, MAIN_IV, proto_bytes)
+            url = "https://loginbp.ggblueshark.com/MajorLogin"
+            headers = {'User-Agent': USERAGENT, 'Connection': "Keep-Alive", 'Accept-Encoding': "gzip",
+                       'Content-Type': "application/octet-stream", 'Expect': "100-continue", 'X-Unity-Version': "2018.4.11f1",
+                       'X-GA': "v1 1", 'ReleaseVersion': RELEASEVERSION}
+            async with httpx.AsyncClient(verify=False) as client:
+                resp = await client.post(url, data=payload, headers=headers)
+                msg = json.loads(json_format.MessageToJson(decode_protobuf(resp.content, FreeFire_pb2.LoginRes)))
+                
+                token = msg.get('token')
+                server_url = msg.get('serverUrl')
+                
+                # যদি অ্যাকাউন্টটি ব্যানড হয় (টোকেন বা ইউআরএল না পাওয়া যায়)
+                if not token or not server_url:
+                    continue # পরের অ্যাকাউন্টটি ট্রাই করবে
+                
+                # সফল হলে সচল অ্যাকাউন্টের ইনডেক্সটি সেভ করে রাখবে
+                working_account_index = idx
+                
+                cached_tokens[region] = {
+                    'token': f"Bearer {token}",
+                    'region': msg.get('lockRegion','0'),
+                    'server_url': server_url,
+                    'expires_at': time.time() + 25200
+                }
+                return cached_tokens[region]
+        except Exception as e:
+            continue
             
-        cached_tokens[region] = {
-            'token': f"Bearer {token}",
-            'region': msg.get('lockRegion','0'),
-            'server_url': server_url,
-            'expires_at': time.time() + 25200
-        }
+    raise ValueError(f"All {len(accounts)} accounts in accounts.txt are banned or failed to login.")
 
 async def initialize_tokens():
-    # সিকোয়েনশিয়াল লুপ ব্যবহার করা হয়েছে যাতে সকেট এরর না হয়
     for r in SUPPORTED_REGIONS:
         try:
             await create_jwt(r)
-            await asyncio.sleep(0.5) # প্রতিটি রিকোয়েস্টের মাঝে বিরতি
+            await asyncio.sleep(0.5)
         except Exception as e:
             continue
 
@@ -133,7 +160,6 @@ async def GetAccountInformation(uid, unk, region, endpoint):
                'Content-Type': "application/octet-stream", 'Expect': "100-continue",
                'Authorization': token, 'X-Unity-Version': "2018.4.11f1", 'X-GA': "v1 1",
                'ReleaseVersion': RELEASEVERSION}
-    # verify=False যুক্ত করে এসএসএল এরর এড়ানো হয়েছে
     async with httpx.AsyncClient(verify=False) as client:
         resp = await client.post(server+endpoint, data=data_enc, headers=headers)
         return json.loads(json_format.MessageToJson(decode_protobuf(resp.content, AccountPersonalShow_pb2.AccountPersonalShowInfo)))
@@ -164,7 +190,6 @@ def get_account_info():
 
     errors = {}
 
-    # Check cached region for UID
     if uid in uid_region_cache:
         try:
             return_data = asyncio.run(GetAccountInformation(uid, "7", uid_region_cache[uid], "/GetPlayerPersonalShow"))
