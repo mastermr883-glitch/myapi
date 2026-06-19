@@ -20,7 +20,7 @@ MAIN_KEY = base64.b64decode('WWcmdGMlREV1aDYlWmNeOA==')
 MAIN_IV = base64.b64decode('Nm95WkRyMjJFM3ljaGpNJQ==')
 RELEASEVERSION = "OB53" # গেম আপডেটের সাথে এটি পরিবর্তন করতে হবে (যেমন: OB54)
 USERAGENT = "Dalvik/2.1.0 (Linux; U; Android 13; CPH2095 Build/RKQ1.211119.001)"
-SUPPORTED_REGIONS = {"IND", "BR", "US", "SAC", "NA", "SG", "RU", "ID", "TW", "VN", "TH", "ME", "PK", "CIS", "BD", "EUROPE"}
+SUPPORTED_REGIONS = ["IND", "BR", "US", "SAC", "NA", "SG", "RU", "ID", "TW", "VN", "TH", "ME", "PK", "CIS", "BD", "EUROPE"]
 
 # === Flask App Setup ===
 
@@ -65,7 +65,8 @@ async def get_access_token(account: str):
     url = "https://ffmconnect.live.gop.garenanow.com/oauth/guest/token/grant"
     payload = account + "&response_type=token&client_type=2&client_secret=2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3&client_id=100067"
     headers = {'User-Agent': USERAGENT, 'Connection': "Keep-Alive", 'Accept-Encoding': "gzip", 'Content-Type': "application/x-www-form-urlencoded"}
-    async with httpx.AsyncClient() as client:
+    # verify=False যুক্ত করে এসএসএল এরর এড়ানো হয়েছে
+    async with httpx.AsyncClient(verify=False) as client:
         resp = await client.post(url, data=payload, headers=headers)
         data = resp.json()
         return data.get("access_token", "0"), data.get("open_id", "0")
@@ -80,16 +81,16 @@ async def create_jwt(region: str):
     headers = {'User-Agent': USERAGENT, 'Connection': "Keep-Alive", 'Accept-Encoding': "gzip",
                'Content-Type': "application/octet-stream", 'Expect': "100-continue", 'X-Unity-Version': "2018.4.11f1",
                'X-GA': "v1 1", 'ReleaseVersion': RELEASEVERSION}
-    async with httpx.AsyncClient() as client:
+    # verify=False যুক্ত করে এসএসএল এরর এড়ানো হয়েছে
+    async with httpx.AsyncClient(verify=False) as client:
         resp = await client.post(url, data=payload, headers=headers)
         msg = json.loads(json_format.MessageToJson(decode_protobuf(resp.content, FreeFire_pb2.LoginRes)))
         
         token = msg.get('token')
         server_url = msg.get('serverUrl')
         
-        # কোনো কারণে টোকেন বা ইউআরএল না পাওয়া গেলে এক্সেপশন থ্রো করবে (ক্যাশ করবে না)
         if not token or not server_url:
-            raise ValueError(f"MajorLogin failed for region {region}. Account might be banned or rate-limited. Response: {msg}")
+            raise ValueError(f"MajorLogin failed for region {region}. Response: {msg}")
             
         cached_tokens[region] = {
             'token': f"Bearer {token}",
@@ -99,8 +100,13 @@ async def create_jwt(region: str):
         }
 
 async def initialize_tokens():
-    tasks = [create_jwt(r) for r in SUPPORTED_REGIONS]
-    await asyncio.gather(*tasks)
+    # সিকোয়েনশিয়াল লুপ ব্যবহার করা হয়েছে যাতে সকেট এরর না হয়
+    for r in SUPPORTED_REGIONS:
+        try:
+            await create_jwt(r)
+            await asyncio.sleep(0.5) # প্রতিটি রিকোয়েস্টের মাঝে বিরতি
+        except Exception as e:
+            continue
 
 async def refresh_tokens_periodically():
     while True:
@@ -120,7 +126,6 @@ async def GetAccountInformation(uid, unk, region, endpoint):
     data_enc = aes_cbc_encrypt(MAIN_KEY, MAIN_IV, payload)
     token, lock, server = await get_token_info(region)
     
-    # ইউআরএল-এ প্রোটোকল মিসিং থাকলে যুক্ত করে দেবে
     if not server.startswith("http://") and not server.startswith("https://"):
         server = "http://" + server
         
@@ -128,7 +133,8 @@ async def GetAccountInformation(uid, unk, region, endpoint):
                'Content-Type': "application/octet-stream", 'Expect': "100-continue",
                'Authorization': token, 'X-Unity-Version': "2018.4.11f1", 'X-GA': "v1 1",
                'ReleaseVersion': RELEASEVERSION}
-    async with httpx.AsyncClient() as client:
+    # verify=False যুক্ত করে এসএসএল এরর এড়ানো হয়েছে
+    async with httpx.AsyncClient(verify=False) as client:
         resp = await client.post(server+endpoint, data=data_enc, headers=headers)
         return json.loads(json_format.MessageToJson(decode_protobuf(resp.content, AccountPersonalShow_pb2.AccountPersonalShowInfo)))
 
